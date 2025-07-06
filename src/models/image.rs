@@ -30,9 +30,14 @@ impl Image {
         let new_image = image
             .image
             .resize(new_size.width, new_size.height, CatmullRom);
+        let width = new_image.width();
+        let height = new_image.height();
         Self {
             image: new_image,
-            dimensions: new_size,
+            dimensions: ImageDimensions {
+                width: width,
+                height: height,
+            },
         }
     }
 

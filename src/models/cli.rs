@@ -7,5 +7,5 @@ pub struct Cli {
     pub image_path: PathBuf,
 
     #[arg(short, long)]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 }

@@ -1,38 +1,31 @@
 use crate::models::circle::{IntegerPoint, Point};
 
 pub fn bresenham(start: Point, end: Point) -> Vec<IntegerPoint> {
-    let (x1, y1) = (start.x.round() as u32, start.y.round() as u32);
-    let (x2, y2) = (end.x.round() as u32, end.y.round() as u32);
-    let sign_x: i32 = if x1 < x2 { 1 } else { -1 };
-    let delta_x: i32 = if x1 < x2 {
-        x2 as i32 - x1 as i32
-    } else {
-        x1 as i32 - x2 as i32
-    };
-    let sign_y: i32 = if y1 < y2 { 1 } else { -1 };
-    let delta_y: i32 = if y1 < y2 {
-        y2 as i32 - y1 as i32
-    } else {
-        y1 as i32 - y2 as i32
-    };
-    let mut error: i32 = delta_x - delta_y;
-    let mut x: i32 = x1 as i32;
-    let mut y: i32 = y1 as i32;
+    let mut x0 = start.x.round() as i32;
+    let mut y0 = start.y.round() as i32;
+    let x1 = end.x.round() as i32;
+    let y1 = end.y.round() as i32;
 
-    let mut points: Vec<IntegerPoint> = Vec::new();
-    for _ in 0..delta_x + delta_y + 1 {
-        points.push(IntegerPoint { x, y });
-        if x == x2 as i32 && y == y2 as i32 {
+    let mut points = Vec::new();
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        points.push(IntegerPoint { x: x0, y: y0 });
+        if x0 == x1 && y0 == y1 {
             break;
         }
-        let e = 2 * error;
-        if e > -delta_y {
-            error -= delta_y;
-            x += sign_x;
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
         }
-        if e < delta_x {
-            error += delta_x;
-            y += sign_y;
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
         }
     }
     points
