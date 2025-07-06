@@ -1,108 +1,96 @@
 mod models;
 mod utils;
 
-use std::collections::HashSet;
-
 use clap::Parser;
-use image::{GenericImageView, Rgba};
+use image::{DynamicImage, ImageBuffer, Rgb};
+use quantette::{ColorSpace, ImagePipeline, PaletteSize, QuantizeMethod};
+use rayon::prelude::*;
+use std::error::Error;
 
-use crate::models::circle::Point;
-use crate::models::circle::{Circle, IntegerPoint};
+use crate::models::circle::Circle;
+use crate::models::circle::{IntegerPoint, Point};
 use crate::models::cli::Cli;
 use crate::models::image::{Image, ImageDimensions};
 use crate::utils::generate_circle::get_circle_points;
+use crate::utils::plotter::save_paths_as_svg;
 use crate::utils::rasterizer::bresenham;
 
-fn point_to_index(n: usize, i: usize, j: usize) -> usize {
-    if i < j {
-        i * (n - 1) - i * (i + 1) / 2 + j - 1
-    } else {
-        j * (n - 1) - j * (j + 1) / 2 + i - 1
-    }
+fn color_distance_sq(c1: Rgb<u8>, c2: Rgb<u8>) -> f64 {
+    let r_diff = (c1[0] as f64 - c2[0] as f64).powi(2);
+    let g_diff = (c1[1] as f64 - c2[1] as f64).powi(2);
+    let b_diff = (c1[2] as f64 - c2[2] as f64).powi(2);
+    r_diff + g_diff + b_diff
 }
 
-fn get_metrics(line: &Vec<IntegerPoint>, image: &Image) -> (u32, u32) {
-    let mut accuracy: u32 = 0;
-    let mut error: u32 = 0;
+fn get_palette(
+    source_image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    num_colors: usize,
+) -> Result<Vec<Rgb<u8>>, Box<dyn Error>> {
+    let quantette_image = quantette::image::ImageBuffer::<quantette::image::Rgb<u8>, _>::from_raw(
+        source_image.width(),
+        source_image.height(),
+        source_image.clone().into_raw(),
+    )
+    .ok_or("Failed to create quantette image")?;
+
+    let mut pipeline = ImagePipeline::try_from(&quantette_image)?;
+    let (quantized_palette, _) = pipeline
+        .palette_size(PaletteSize::from(num_colors as u8))
+        .dither(true)
+        .colorspace(ColorSpace::Srgb)
+        .quantize_method(QuantizeMethod::kmeans())
+        .indexed_palette_par();
+
+    let palette = quantized_palette
+        .iter()
+        .map(|c| Rgb([c.red, c.green, c.blue]))
+        .collect();
+
+    Ok(palette)
+}
+
+fn draw_line_on_canvas(
+    canvas: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    line: &[IntegerPoint],
+    color: Rgb<u8>,
+    opacity: f64,
+    height: u32,
+) {
     for point in line {
-        let x = point.x;
-        let y = point.y;
-        if x < 0
-            || y < 0
-            || x >= image.dimensions.width as i32
-            || y >= image.dimensions.height as i32
+        if point.x >= 0
+            && point.y >= 0
+            && point.x < canvas.width() as i32
+            && point.y < height as i32
         {
-            continue;
+            let pixel_y = (height as i32 - point.y - 1) as u32;
+            let background_pixel = *canvas.get_pixel(point.x as u32, pixel_y);
+
+            let r = (background_pixel[0] as f64 * (1.0 - opacity) + color[0] as f64 * opacity)
+                .round() as u8;
+            let g = (background_pixel[1] as f64 * (1.0 - opacity) + color[1] as f64 * opacity)
+                .round() as u8;
+            let b = (background_pixel[2] as f64 * (1.0 - opacity) + color[2] as f64 * opacity)
+                .round() as u8;
+
+            canvas.put_pixel(point.x as u32, pixel_y, Rgb([r, g, b]));
         }
-        let pixel = image
-            .image
-            .get_pixel(x as u32, (image.dimensions.height as i32 - y - 1) as u32);
-        accuracy += match pixel {
-            Rgba([255, 255, 255, 255]) => 0,
-            _ => 1,
-        };
-        error += match pixel {
-            Rgba([255, 255, 255, 255]) => 1,
-            _ => 0,
-        };
     }
-    (accuracy, error)
 }
 
-fn solve(bresenham_lines: Vec<Vec<IntegerPoint>>, image: &Image, n: usize) -> Vec<usize> {
-    let mut current_point_index: usize = 0;
-    let mut path: Vec<usize> = Vec::new();
-    let mut visited: HashSet<usize> = HashSet::new();
-    path.push(current_point_index);
-    loop {
-        let mut current_accuracy: u32 = 0;
-        let mut current_error: u32 = 2 * n as u32;
-        let mut best_point_index = current_point_index;
-        for j in 0..n {
-            if current_point_index == j {
-                continue;
-            }
-            let current_index = point_to_index(n, current_point_index, j);
-            if visited.contains(&current_index) {
-                continue;
-            }
-            let bresenham_line = &bresenham_lines[current_index];
-            let (accuracy, error) = get_metrics(bresenham_line, image);
-            if accuracy > current_accuracy
-                || (accuracy == current_accuracy && error < current_error)
-            {
-                current_accuracy = accuracy;
-                current_error = error;
-                best_point_index = j;
-            }
-        }
-        if current_point_index == best_point_index {
-            break;
-        }
-        if current_accuracy as f32 / ((current_accuracy + current_error) as f32) < 0.45_f32 {
-            break;
-        }
-        let line_index = point_to_index(n, current_point_index, best_point_index);
-        visited.insert(line_index);
-        current_point_index = best_point_index;
-        path.push(best_point_index);
-    }
-    path
-}
-
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
-    let image: Image = Image::read_image(args.image_path);
-    let max_height: u32 = 512;
-    let resized_image: Image = Image::resize_image(
-        image,
+    let max_height: u32 = 720;
+
+    let source_image_struct = Image::read_image(args.image_path)?;
+    let cropped_image_struct = Image::crop_to_square_from_center(source_image_struct);
+    let resized_image_struct = Image::resize_image(
+        cropped_image_struct,
         ImageDimensions {
             width: max_height,
             height: max_height,
         },
     );
-    let image_bw = Image::to_black_and_white(resized_image);
-    let n: usize = 1024;
+
     let circle = Circle {
         center: IntegerPoint {
             x: max_height as i32 / 2,
@@ -110,35 +98,120 @@ fn main() {
         },
         radius: max_height / 2,
     };
-    let points = get_circle_points(circle, n);
-    let mut all_index: Vec<(usize, usize)> = vec![(0, 0); n * (n - 1) / 2];
-    let mut all_lines: Vec<(Point, Point)> =
-        vec![(Point { x: 0_f64, y: 0_f64 }, Point { x: 0_f64, y: 0_f64 }); n * (n - 1) / 2];
-    for i in 0..n {
-        for j in i + 1..n {
-            let index: usize = point_to_index(n, i, j);
-            all_index[index] = (i, j);
-            all_lines[index] = (
-                Point {
-                    x: points[i].x,
-                    y: points[i].y,
-                },
-                Point {
-                    x: points[j].x,
-                    y: points[j].y,
-                },
-            );
-        }
-    }
-    let bresenham_lines: Vec<Vec<IntegerPoint>> = all_lines
-        .into_iter()
-        .map(|line| bresenham(line.0, line.1))
-        .collect();
+    let points = get_circle_points(circle, args.nodes);
 
-    let path = solve(bresenham_lines, &image_bw, n);
-    println!("{}", path.len());
-    for point_index in path {
-        let point = points[point_index];
-        println!("{{ {},{} }},", point.x, point.y);
+    let (source_rgb, palette) = if args.colors <= 1 {
+        println!("Processing in black and white mode.");
+        let bw_image = Image::to_black_and_white(resized_image_struct);
+        let source_rgb = bw_image.image.to_rgb8();
+        let palette = vec![Rgb([0, 0, 0])];
+        (source_rgb, palette)
+    } else {
+        println!(
+            "Processing in multi-color mode with {} colors.",
+            args.colors
+        );
+        let source_rgb = resized_image_struct.image.to_rgb8();
+        let palette = get_palette(&source_rgb, args.colors)?;
+        println!("Using colors: {:?}", palette);
+        (source_rgb, palette)
+    };
+
+    let mut canvas =
+        ImageBuffer::<Rgb<u8>, _>::from_pixel(max_height, max_height, Rgb([255, 255, 255]));
+
+    let mut paths: Vec<(Vec<usize>, Rgb<u8>)> =
+        palette.iter().map(|&color| (vec![0], color)).collect();
+
+    let line_opacity = 0.16;
+
+    for i in 0..args.max_lines {
+        if i % 100 == 0 {
+            println!("Finding line {}/{}...", i + 1, args.max_lines);
+        }
+
+        let best_move = paths
+            .par_iter()
+            .enumerate()
+            .map(|(color_idx, (path, line_color))| {
+                let current_pin_idx = *path.last().unwrap();
+                let mut best_score_for_color = -1.0;
+                let mut best_next_pin_for_color = current_pin_idx;
+
+                for next_pin_idx in 0..args.nodes {
+                    if next_pin_idx == current_pin_idx {
+                        continue;
+                    }
+
+                    let line = bresenham(points[current_pin_idx], points[next_pin_idx]);
+                    let mut current_score = 0.0;
+
+                    for p in &line {
+                        if p.x >= 0
+                            && p.y >= 0
+                            && p.x < max_height as i32
+                            && p.y < max_height as i32
+                        {
+                            let pixel_y = (max_height as i32 - p.y - 1) as u32;
+                            let source_pixel = *source_rgb.get_pixel(p.x as u32, pixel_y);
+                            let canvas_pixel = *canvas.get_pixel(p.x as u32, pixel_y);
+
+                            let error_before = color_distance_sq(source_pixel, canvas_pixel);
+
+                            let blended_r = (canvas_pixel[0] as f64 * (1.0 - line_opacity)
+                                + line_color[0] as f64 * line_opacity)
+                                .round() as u8;
+                            let blended_g = (canvas_pixel[1] as f64 * (1.0 - line_opacity)
+                                + line_color[1] as f64 * line_opacity)
+                                .round() as u8;
+                            let blended_b = (canvas_pixel[2] as f64 * (1.0 - line_opacity)
+                                + line_color[2] as f64 * line_opacity)
+                                .round() as u8;
+                            let blended_color = Rgb([blended_r, blended_g, blended_b]);
+
+                            let error_after = color_distance_sq(source_pixel, blended_color);
+
+                            current_score += error_before - error_after;
+                        }
+                    }
+
+                    if current_score > best_score_for_color {
+                        best_score_for_color = current_score;
+                        best_next_pin_for_color = next_pin_idx;
+                    }
+                }
+                (best_score_for_color, color_idx, best_next_pin_for_color)
+            })
+            .reduce(|| (-1.0, 0, 0), |a, b| if a.0 > b.0 { a } else { b });
+
+        let (score, best_color_idx, best_next_pin) = best_move;
+
+        if score <= 0.0 {
+            println!("No more improvements found. Stopping at line {}.", i);
+            break;
+        }
+
+        let (path, color) = &mut paths[best_color_idx];
+        let start_pin = *path.last().unwrap();
+
+        let line_to_draw = bresenham(points[start_pin], points[best_next_pin]);
+        draw_line_on_canvas(&mut canvas, &line_to_draw, *color, line_opacity, max_height);
+
+        path.push(best_next_pin);
     }
+
+    if let Some(output_path) = args.output {
+        println!("Saving SVG to {}...", output_path.display());
+        let image_dims = ImageDimensions {
+            width: max_height,
+            height: max_height,
+        };
+        save_paths_as_svg(&output_path, &image_dims, &points, &paths)?;
+        println!("Successfully saved SVG.");
+    } else {
+        println!("\nNo output path provided. Skipping save.");
+        println!("To save the result, run with --output <filename.svg>");
+    }
+
+    Ok(())
 }
