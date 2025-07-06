@@ -1,2 +1,8 @@
 /target
 .bacon-locations
+
+**/*.png
+**/*.PNG
+**/*.jpeg
+**/*.jpg
+**/*.svg
